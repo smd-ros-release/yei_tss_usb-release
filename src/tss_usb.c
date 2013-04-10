@@ -62,6 +62,9 @@ enum tss_usb_commands
 	CMD_READ_NORMALIZED_GYROS = 0x21,
 	CMD_READ_NORMALIZED_ACCELEROMETER = 0x22,
 	CMD_READ_CORRECTED_ACCELEROMETER = 0x27,
+	CMD_READ_CORRECTED_COMPASS_VECTOR = 0x28,
+	CMD_GET_TEMPERATURE_C = 0x2B,
+	CMD_GET_TEMPERATURE_F = 0x2C,
 	CMD_TARE_WITH_CURRENT_ORIENTATION = 0x60,
 	CMD_SET_MULTI_REFERENCE_VECTORS_WITH_CURRENT_ORIENTATION = 0x68,
 	CMD_SET_REFERENCE_VECTOR_MODE = 0x69,
@@ -611,4 +614,53 @@ int tss_set_reference_mode( const int tssd, const unsigned char val )
 
 	return send_cmd( tss_usb_list[tssd]->fd, buf, sizeof( buf ) );
 }
+
+int tss_get_temperature_c( const int tssd, float *val )
+{
+	#ifndef NO_FLUSH_BUFFER
+	/* Clear Response Buffer */
+	tcflush( tss_usb_list[tssd]->fd, TCIOFLUSH );
+	#endif
+
+	/* Construct Packet Payload */
+	unsigned char buf[3] = { CMD_HEADER, CMD_GET_TEMPERATURE_C, CMD_GET_TEMPERATURE_C };
+	int ret;
+
+	if( ( ret = send_cmd( tss_usb_list[tssd]->fd, buf, sizeof( buf ) ) ) < 0 )
+		return ret;
+
+	/* Read Response */
+	if( ( ret = read_data( tss_usb_list[tssd]->fd, (unsigned char *)val, sizeof( float ) ) ) < 0 )
+		return ret;
+
+	endian_swap( (unsigned int *)val );
+
+	return TSS_USB_SUCCESS;
+}
+
+int tss_read_compass( const int tssd, float vals[3] )
+{
+	#ifndef NO_FLUSH_BUFFER
+	/* Clear Response Buffer */
+	tcflush( tss_usb_list[tssd]->fd, TCIOFLUSH );
+	#endif
+
+	/* Construct Packet Payload */
+	unsigned char buf[3] = { CMD_HEADER, CMD_READ_CORRECTED_COMPASS_VECTOR, CMD_READ_CORRECTED_COMPASS_VECTOR };
+	int ret;
+
+	if( ( ret = send_cmd( tss_usb_list[tssd]->fd, buf, sizeof( buf ) ) ) < 0 )
+		return ret;
+
+	/* Read Response */
+	if( ( ret = read_data( tss_usb_list[tssd]->fd, (unsigned char *)vals, 3 * sizeof( float ) ) ) < 0 )
+		return ret;
+
+	endian_swap( (unsigned int *)&vals[0] );
+	endian_swap( (unsigned int *)&vals[1] );
+	endian_swap( (unsigned int *)&vals[2] );
+
+	return TSS_USB_SUCCESS;
+}
+
 
