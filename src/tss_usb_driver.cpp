@@ -3,6 +3,8 @@
 #include <iomanip>
 
 #include <sensor_msgs/Imu.h>
+#include <sensor_msgs/Temperature.h>
+#include <sensor_msgs/MagneticField.h>
 #include <ros/time.h>
 #include <tf/tf.h>
 
@@ -26,6 +28,9 @@ namespace yei_tss_usb
 		invert_y_axis( true ),
 		invert_z_axis( false ),
 		reference_vector_mode( 1 ),
+		orientation_covariance( 0.1 ),
+		angular_velocity_covariance( 0.1 ),
+		linear_acceleration_covariance( 0.1 ),
 		grav_vect( 0, 0, GRAVITATIONAL_ACCELERATION ),
 		spin_rate( 100 ),
 		spin_thread( &TSSUSB::spin, this )
@@ -55,6 +60,11 @@ namespace yei_tss_usb
 		grav_vect = tf::Vector3( temp_gravity_vector[0], temp_gravity_vector[1], temp_gravity_vector[2] );
 		nh_priv.param( "reference_vector_mode", reference_vector_mode, 1 );
 		ROS_ASSERT( reference_vector_mode >= 0 && reference_vector_mode <= 3 );
+		nh_priv.param( "orientation_covariance", orientation_covariance, 0.0 );
+		nh_priv.param( "angular_velocity_covariance", angular_velocity_covariance, 0.0 );
+		nh_priv.param( "linear_acceleration_covariance", linear_acceleration_covariance, 0.0 );
+		nh_priv.param( "temperature_variance", temperature_variance, 0.0 );
+		nh_priv.param( "magnetic_field_covariance", magnetic_field_covariance, 0.0 );
 	}
 
 	TSSUSB::~TSSUSB( )
@@ -122,6 +132,8 @@ namespace yei_tss_usb
 		diag.setHardwareIDf( "YEI TSS on %s", port.c_str( ) );
 
 		imu_pub = nh.advertise<sensor_msgs::Imu>( "imu/data", 1 );
+		temp_pub = nh.advertise<sensor_msgs::Temperature>( "imu/temp", 1 );
+		mag_pub = nh.advertise<sensor_msgs::MagneticField>( "imu/mag", 1 );
 		tare_srv = nh_priv.advertiseService( "tare", &TSSUSB::TareCB, this );
 		commit_srv = nh_priv.advertiseService( "commit", &TSSUSB::CommitCB, this );
 		reset_srv = nh_priv.advertiseService( "reset", &TSSUSB::ResetCB, this );
@@ -149,6 +161,10 @@ namespace yei_tss_usb
 		tss_usb_close( old_tssd );
 		if( imu_pub )
 			imu_pub.shutdown( );
+		if( temp_pub )
+			temp_pub.shutdown( );
+		if( mag_pub )
+			mag_pub.shutdown( );
 		if( tare_srv )
 			tare_srv.shutdown( );
 		if( commit_srv )
@@ -174,16 +190,21 @@ namespace yei_tss_usb
 
 	void TSSUSB::spinOnce( )
 	{
-		boost::mutex::scoped_lock lock( cmd_lock );
+		cmd_lock.lock( );
 		if( tssd < 0 && !TSSOpenNoLock( ) )
 			return;
 
 		int ret;
 
+		/*
+		 * IMU Data
+		 */
+
 		float quat[4];
 		if( ( ret = tss_get_orientation_quaternion( tssd, quat ) ) < 0 )
 		{
 			TSSCloseNoLock( );
+			cmd_lock.unlock( );
 			io_failure_count++;
 			return;
 		}
@@ -192,6 +213,7 @@ namespace yei_tss_usb
 		if( ( ret = tss_get_filtered_gyro( tssd, gyro ) ) < 0 )
 		{
 			TSSCloseNoLock( );
+			cmd_lock.unlock( );
 			io_failure_count++;
 			return;
 		}
@@ -200,6 +222,7 @@ namespace yei_tss_usb
 		if( ( ret = tss_get_accel( tssd, accel ) ) < 0 )
 		{
 			TSSCloseNoLock( );
+			cmd_lock.unlock( );
 			io_failure_count++;
 			return;
 		}
@@ -268,13 +291,69 @@ namespace yei_tss_usb
 		msg->linear_acceleration.z += tmp_grav_vect.z( );
 
 		/* Dummy Values */
-		msg->orientation_covariance[0] = .1;
-		msg->orientation_covariance[4] = .1;
-		msg->orientation_covariance[8] = .1;
+		msg->orientation_covariance[0] = orientation_covariance;
+		msg->orientation_covariance[4] = orientation_covariance;
+		msg->orientation_covariance[8] = orientation_covariance;
+		msg->angular_velocity_covariance[0] = angular_velocity_covariance;
+		msg->angular_velocity_covariance[4] = angular_velocity_covariance;
+		msg->angular_velocity_covariance[8] = angular_velocity_covariance;
+		msg->linear_acceleration_covariance[0] = linear_acceleration_covariance;
+		msg->linear_acceleration_covariance[4] = linear_acceleration_covariance;
+		msg->linear_acceleration_covariance[8] = linear_acceleration_covariance;
 
 		imu_pub.publish( msg );
-		diag_pub_freq.tick( );
 
+		/*
+		 * Temperature
+		 */
+
+		cmd_lock.lock( );
+
+		float temp;
+		if( ( ret = tss_get_temperature_c( tssd, &temp ) ) < 0 )
+		{
+			TSSCloseNoLock( );
+			io_failure_count++;
+			return;
+		}
+
+		cmd_lock.unlock( );
+
+		sensor_msgs::TemperaturePtr temp_msg( new sensor_msgs::Temperature );
+		temp_msg->header = msg->header;
+		temp_msg->temperature = temp;
+		temp_msg->variance = temperature_variance;
+
+		temp_pub.publish( temp_msg );
+
+		/*
+		 * Magnetic Field
+		 */
+
+		cmd_lock.lock( );
+
+		float mag[3];
+		if( ( ret = tss_read_compass( tssd, mag ) ) < 0 )
+		{
+			TSSCloseNoLock( );
+			io_failure_count++;
+			return;
+		}
+
+		cmd_lock.unlock( );
+
+		sensor_msgs::MagneticFieldPtr mag_msg( new sensor_msgs::MagneticField );
+		mag_msg->header = msg->header;
+		mag_msg->magnetic_field.x = 0.0001 * mag[0];
+		mag_msg->magnetic_field.y = 0.0001 * mag[1];
+		mag_msg->magnetic_field.z = 0.0001 * mag[2];
+		mag_msg->magnetic_field_covariance[0] = magnetic_field_covariance;
+		mag_msg->magnetic_field_covariance[4] = magnetic_field_covariance;
+		mag_msg->magnetic_field_covariance[8] = magnetic_field_covariance;
+
+		mag_pub.publish( mag_msg );
+
+		diag_pub_freq.tick( );
 	}
 
 	void TSSUSB::DiagCB( diagnostic_updater::DiagnosticStatusWrapper &stat )
